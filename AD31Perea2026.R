@@ -1,5 +1,5 @@
 # ============================================
-# SLS Dashboard Pipeline - v2
+# SLS Dashboard Pipeline - v3
 # ============================================
 # Client: AD31Perea_2026
 # BigQuery Dataset: slscampaigns-364520/AD31Perea_2026
@@ -12,7 +12,7 @@
 #   
 #   CallHub Export - For total attempt counts (includes no-answers, machines)
 #
-# FIELD CANVASSING (PDI) RESPONSE CODES:
+# RESPONSE CODES (PDI):
 #   SS = Strong Support    → Contact = Y, Conversation = Y, Category = Yes
 #   LS = Lean Support      → Contact = Y, Conversation = Y, Category = Yes
 #   U  = Undecided         → Contact = Y, Conversation = Y, Category = Undecided
@@ -22,11 +22,6 @@
 #   D  = Deceased          → Contact = N, Conversation = N, Category = No Contact
 #   GTD = Gated            → Contact = N, Conversation = N, Category = No Contact
 #   MV = Moved             → Contact = N, Conversation = N, Category = No Contact
-#
-# METRICS:
-#   Attempts            = COUNT(*)
-#   Contacts            = COUNT WHERE Contact = Y
-#   Voter Conversations = COUNT WHERE Conversation = Y
 #
 # ============================================
 
@@ -83,14 +78,14 @@ print(paste("- CallHub (PHONEBANK has value):", sum(!is.na(pdi$PHONEBANK) & pdi$
 # ============================================
 callhub_raw <- read.csv(callhub_path, stringsAsFactors = FALSE)
 
-# Parse date
+print(paste("CallHub raw rows (total attempts):", nrow(callhub_raw)))
+
+# Parse date - using starting_date column
 callhub_raw <- callhub_raw %>%
   mutate(
-    DATE = as.Date(ymd_hms(date)),
-    TIME = format(ymd_hms(date), "%H:%M:%S")
+    DATE = as.Date(ymd_hms(starting_date)),
+    TIME = format(ymd_hms(starting_date), "%H:%M:%S")
   )
-
-print(paste("CallHub raw rows (total attempts):", nrow(callhub_raw)))
 
 # ============================================
 # SECTION 3: READ UNIVERSE/CONTACT LIST
@@ -186,24 +181,21 @@ print(paste("CallHub responses (from PDI):", nrow(callhub_responses)))
 # ============================================
 # SECTION 5: PROCESS CALLHUB ATTEMPTS (all dials)
 # ============================================
-# This captures ALL CallHub attempts including no-answers, machines, etc.
-# These don't sync to PDI but count as attempts
-
 callhub_attempts <- callhub_raw %>%
   mutate(
     SOURCE = "CALLHUB",
     CHANNEL = "Phone",
-    PDIID = pdi_id,
+    PDIID = as.character(pdi_id),
     AGENT = agent,
     CAMPAIGN_NAME = campaign_name,
     
     # Map disposition to response category
     RESPONSE_CATEGORY = case_when(
-      Call.Disposition %in% c("MACHINE", "NO_ANSWER", "USER_BUSY", "LEFT_MESSAGE", 
-                               "BAD_NUMBER", "FAILED", "ORIGINATOR_CANCEL") ~ "No Contact",
-      Call.Disposition %in% c("NOT_INTERESTED", "DO_NOT_CALL") ~ "Refused",
-      Call.Disposition %in% c("ANSWER", "MEANINGFUL_INTERACTION", "CALLBACK", 
-                               "SEND_INFORMATION", "OTHER") ~ "Contact Only",
+      disposition %in% c("MACHINE", "NO_ANSWER", "USER_BUSY", "LEFT_MESSAGE", 
+                         "BAD_NUMBER", "FAILED", "ORIGINATOR_CANCEL", "NOANSWER", "BUSY") ~ "No Contact",
+      disposition %in% c("NOT_INTERESTED", "DO_NOT_CALL", "DNC") ~ "Refused",
+      disposition %in% c("ANSWER", "MEANINGFUL_INTERACTION", "CALLBACK", 
+                         "SEND_INFORMATION", "OTHER", "ANSWERED") ~ "Contact Only",
       TRUE ~ "No Contact"
     ),
     
@@ -211,7 +203,7 @@ callhub_attempts <- callhub_raw %>%
     CONTACT_MADE = "N",
     IS_CONVERSATION = 0,
     
-    # Placeholder demographics (will be NA for non-PDI-synced records)
+    # Placeholder demographics
     RESPONSECODE = NA_character_,
     V1_FIRSTNAME = NA_character_,
     V1_LASTNAME = NA_character_,
@@ -235,7 +227,6 @@ callhub_attempts <- callhub_raw %>%
          V1_AGE, AGE_GROUP, CITYCODE, CD, SD, AD)
 
 # Remove CallHub attempts that already synced to PDI (avoid double counting)
-# Match on PDIID + DATE
 synced_keys <- callhub_responses %>%
   filter(!is.na(PDIID)) %>%
   mutate(key = paste(PDIID, DATE, sep = "_")) %>%
