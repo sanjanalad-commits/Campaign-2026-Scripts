@@ -1,27 +1,32 @@
 # ============================================
-# CD9 Ugarte 2026 — Dashboard Pipeline
+# SLS Dashboard Pipeline - v2
 # ============================================
-# Client: CD9 Ugarte
+# Client: CD9Ugarte_2026
 # BigQuery Dataset: slscampaigns-364520/CD9Ugarte_2026
 # ============================================
 #
-# METRIC DEFINITIONS
-# ============================================
-# 
-# RESPONSE CODES:
+# DATA SOURCES:
+#   PDI All Flags Export - Contains BOTH Field and CallHub responses
+#     - PHONEBANK column empty = Field (Door Knock)
+#     - PHONEBANK column has value = CallHub (Phone)
+#   
+#   CallHub Export - For total attempt counts (includes no-answers, machines)
+#
+# FIELD CANVASSING (PDI) RESPONSE CODES:
 #   SS = Strong Support    → Contact = Y, Conversation = Y, Category = Yes
 #   LS = Lean Support      → Contact = Y, Conversation = Y, Category = Yes
 #   U  = Undecided         → Contact = Y, Conversation = Y, Category = Undecided
 #   LO = Lean Oppose       → Contact = Y, Conversation = Y, Category = No
 #   SO = Strong Oppose     → Contact = Y, Conversation = Y, Category = No
-#   REF = Refused          → Contact = Y, Conversation = N, Category = Refused
 #   NH = Not Home          → Contact = N, Conversation = N, Category = No Contact
-#   DKNA = Did Not Answer  → Contact = N, Conversation = N, Category = No Contact
+#   D  = Deceased          → Contact = N, Conversation = N, Category = No Contact
+#   GTD = Gated            → Contact = N, Conversation = N, Category = No Contact
+#   MV = Moved             → Contact = N, Conversation = N, Category = No Contact
 #
 # METRICS:
-#   Attempts          = COUNT(*)
-#   Contacts          = COUNT WHERE RESPONSECODE IN (SS, LS, U, LO, SO, REF)
-#   Voter Conversations = COUNT WHERE RESPONSECODE IN (SS, LS, U, LO, SO)
+#   Attempts            = COUNT(*)
+#   Contacts            = COUNT WHERE Contact = Y
+#   Voter Conversations = COUNT WHERE Conversation = Y
 #
 # ============================================
 
@@ -40,7 +45,7 @@ BQ_PROJECT <- "slscampaigns-364520"
 BQ_DATASET <- "CD9Ugarte_2026"
 
 # File paths - UPDATE THESE FOR EACH RUN
-field_path <- '/Users/sanjanalad/Downloads/CD9Ugarte_AllFlags.csv'
+pdi_allflags_path <- '/Users/sanjanalad/Downloads/CD9Ugarte_AllFlags.csv'
 callhub_path <- '/Users/sanjanalad/Downloads/CD9Ugarte_CallHub.csv'
 universe_path <- '/Users/sanjanalad/Downloads/CD9Ugarte_Universe.csv'
 
@@ -50,15 +55,15 @@ print(paste("BQ Dataset:", BQ_PROJECT, "/", BQ_DATASET))
 print(paste("============================================"))
 
 # ============================================
-# SECTION 1: READ FIELD CANVASSING DATA (PDI All Flags)
+# SECTION 1: READ PDI ALL FLAGS (Field + CallHub responses)
 # ============================================
-field <- read.csv(field_path, stringsAsFactors = FALSE)
+pdi <- read.csv(pdi_allflags_path, stringsAsFactors = FALSE)
 
 # Remove duplicates
-field <- field %>% distinct()
+pdi <- pdi %>% distinct()
 
 # Parse date/time
-field <- field %>%
+pdi <- pdi %>%
   mutate(
     ts = ymd_hms(FLAGENTRYDATE, tz = "UTC"),
     DATE = as.Date(ts),
@@ -67,23 +72,25 @@ field <- field %>%
   select(-ts, -FLAGENTRYDATE)
 
 # Filter to Mobile Canvassing
-field <- filter(field, FLAGNAME == "Mobile Canvassing")
+pdi <- filter(pdi, FLAGNAME == "Mobile Canvassing")
 
-print(paste("Field Canvassing rows:", nrow(field)))
+print(paste("PDI All Flags rows:", nrow(pdi)))
+print(paste("- Field (PHONEBANK empty):", sum(is.na(pdi$PHONEBANK) | pdi$PHONEBANK == "")))
+print(paste("- CallHub (PHONEBANK has value):", sum(!is.na(pdi$PHONEBANK) & pdi$PHONEBANK != "")))
 
 # ============================================
-# SECTION 2: READ CALLHUB DATA
+# SECTION 2: READ CALLHUB EXPORT (for total attempts)
 # ============================================
-callhub <- read.csv(callhub_path, stringsAsFactors = FALSE)
+callhub_raw <- read.csv(callhub_path, stringsAsFactors = FALSE)
 
 # Parse date
-callhub <- callhub %>%
+callhub_raw <- callhub_raw %>%
   mutate(
     DATE = as.Date(ymd_hms(date)),
     TIME = format(ymd_hms(date), "%H:%M:%S")
   )
 
-print(paste("CallHub rows:", nrow(callhub)))
+print(paste("CallHub raw rows (total attempts):", nrow(callhub_raw)))
 
 # ============================================
 # SECTION 3: READ UNIVERSE/CONTACT LIST
@@ -99,24 +106,26 @@ universe_full <- select(universe,
 print(paste("Universe rows:", nrow(universe_full)))
 
 # ============================================
-# SECTION 4: PROCESS FIELD CANVASSING
+# SECTION 4: PROCESS PDI DATA (Field + CallHub responses)
 # ============================================
-field$PDIID <- trimws(field$PDIID)
+pdi$PDIID <- trimws(pdi$PDIID)
 universe_full$V1_PDIID <- trimws(universe_full$V1_PDIID)
 
-field_joined <- left_join(field, universe_full, by = c("PDIID" = "V1_PDIID"))
+pdi_joined <- left_join(pdi, universe_full, by = c("PDIID" = "V1_PDIID"))
 
 # Keep only matched records
-field_joined <- field_joined %>% filter(!is.na(V1_LASTNAME))
+pdi_joined <- pdi_joined %>% filter(!is.na(V1_LASTNAME))
 
 # Create dashboard-ready fields
-field_final <- field_joined %>%
+pdi_final <- pdi_joined %>%
   mutate(
-    SOURCE = "FIELD",
-    CHANNEL = "Door Knock",
+    # Determine source based on PHONEBANK column
+    SOURCE = ifelse(is.na(PHONEBANK) | PHONEBANK == "", "FIELD", "CALLHUB"),
+    CHANNEL = ifelse(is.na(PHONEBANK) | PHONEBANK == "", "Door Knock", "Phone"),
+    
     PDIID = PDIID,
     AGENT = CANVASSERNAME,
-    CAMPAIGN_NAME = MOBILEPROJECTASSIGMENT,
+    CAMPAIGN_NAME = ifelse(is.na(PHONEBANK) | PHONEBANK == "", MOBILEPROJECTASSIGMENT, PHONEBANK),
     RESPONSECODE = RESPONSECODE,
     
     # Response Category (for charts)
@@ -124,13 +133,12 @@ field_final <- field_joined %>%
       RESPONSECODE %in% c("SS", "LS") ~ "Yes",
       RESPONSECODE == "U" ~ "Undecided",
       RESPONSECODE %in% c("LO", "SO") ~ "No",
-      RESPONSECODE == "REF" ~ "Refused",
-      RESPONSECODE %in% c("NH", "DKNA") ~ "No Contact",
+      RESPONSECODE %in% c("NH", "D", "GTD", "MV") ~ "No Contact",
       TRUE ~ "Other"
     ),
     
-    # Contact Made: SS, LS, U, LO, SO, REF = Y (human answered)
-    CONTACT_MADE = ifelse(RESPONSECODE %in% c("SS", "LS", "U", "LO", "SO", "REF"), "Y", "N"),
+    # Contact Made: SS, LS, U, LO, SO = Y (human answered and gave response)
+    CONTACT_MADE = ifelse(RESPONSECODE %in% c("SS", "LS", "U", "LO", "SO"), "Y", "N"),
     
     # Voter Conversation: SS, LS, U, LO, SO = 1 (got a support ID)
     IS_CONVERSATION = ifelse(RESPONSECODE %in% c("SS", "LS", "U", "LO", "SO"), 1, 0),
@@ -168,15 +176,20 @@ field_final <- field_joined %>%
          V1_GENDER, GENDER_DISPLAY, V1_ETHNICITY, ETHNICITY_DISPLAY,
          V1_AGE, AGE_GROUP, CITYCODE, CD, SD, AD)
 
-print(paste("Field final rows:", nrow(field_final)))
+# Split into Field and CallHub for separate tables
+field_final <- pdi_final %>% filter(SOURCE == "FIELD")
+callhub_responses <- pdi_final %>% filter(SOURCE == "CALLHUB")
+
+print(paste("Field responses:", nrow(field_final)))
+print(paste("CallHub responses (from PDI):", nrow(callhub_responses)))
 
 # ============================================
-# SECTION 5: PROCESS CALLHUB DATA
+# SECTION 5: PROCESS CALLHUB ATTEMPTS (all dials)
 # ============================================
-# Filter to records with PDIID (needed for demographics)
-callhub_filtered <- callhub %>% filter(!is.na(pdi_id) & pdi_id != "")
+# This captures ALL CallHub attempts including no-answers, machines, etc.
+# These don't sync to PDI but count as attempts
 
-callhub_final <- callhub_filtered %>%
+callhub_attempts <- callhub_raw %>%
   mutate(
     SOURCE = "CALLHUB",
     CHANNEL = "Phone",
@@ -184,59 +197,36 @@ callhub_final <- callhub_filtered %>%
     AGENT = agent,
     CAMPAIGN_NAME = campaign_name,
     
-    # Map "Can we count on your support?" to RESPONSECODE
-    RESPONSECODE = Can.we.count.on.your.support.,
-    
-    # Response Category
+    # Map disposition to response category
     RESPONSE_CATEGORY = case_when(
-      RESPONSECODE %in% c("SS", "LS") ~ "Yes",
-      RESPONSECODE == "U" ~ "Undecided",
-      RESPONSECODE %in% c("LO", "SO") ~ "No",
-      RESPONSECODE == "REF" ~ "Refused",
-      RESPONSECODE %in% c("NH", "DKNA") ~ "No Contact",
-      is.na(RESPONSECODE) | RESPONSECODE == "" ~ "No Contact",
-      TRUE ~ "Other"
+      Call.Disposition %in% c("MACHINE", "NO_ANSWER", "USER_BUSY", "LEFT_MESSAGE", 
+                               "BAD_NUMBER", "FAILED", "ORIGINATOR_CANCEL") ~ "No Contact",
+      Call.Disposition %in% c("NOT_INTERESTED", "DO_NOT_CALL") ~ "Refused",
+      Call.Disposition %in% c("ANSWER", "MEANINGFUL_INTERACTION", "CALLBACK", 
+                               "SEND_INFORMATION", "OTHER") ~ "Contact Only",
+      TRUE ~ "No Contact"
     ),
     
-    # Contact Made
-    CONTACT_MADE = ifelse(RESPONSECODE %in% c("SS", "LS", "U", "LO", "SO", "REF"), "Y", "N"),
+    # For attempts without PDI sync, these are all non-contacts
+    CONTACT_MADE = "N",
+    IS_CONVERSATION = 0,
     
-    # Voter Conversation
-    IS_CONVERSATION = ifelse(RESPONSECODE %in% c("SS", "LS", "U", "LO", "SO"), 1, 0),
-    
-    # Demographics (already in CallHub export)
-    V1_FIRSTNAME = contact_firstname,
-    V1_LASTNAME = contact_lastname,
-    V1_PARTY = V1_PARTY,
-    PARTY_DISPLAY = case_when(
-      V1_PARTY == "D" ~ "Dem",
-      V1_PARTY == "R" ~ "Rep",
-      V1_PARTY %in% c("N", "NP", "NPP", "DS", "AI") ~ "Ind",
-      TRUE ~ "Other"
-    ),
-    V1_GENDER = GENDER,
-    GENDER_DISPLAY = case_when(
-      GENDER == "F" ~ "Women",
-      GENDER == "M" ~ "Men",
-      TRUE ~ "Other"
-    ),
-    V1_ETHNICITY = ETHNICITY,
-    ETHNICITY_DISPLAY = case_when(
-      ETHNICITY %in% c("SS", "Hispanic", "H") ~ "Latino",
-      ETHNICITY %in% c("XX", "White", "W") ~ "White",
-      ETHNICITY %in% c("AA", "Black", "B") ~ "Black",
-      ETHNICITY %in% c("AS", "Asian", "A") ~ "AAPI",
-      TRUE ~ "Other"
-    ),
-    V1_AGE = AGE,
-    AGE_GROUP = case_when(
-      AGE < 30 ~ "18-29",
-      AGE < 45 ~ "30-44",
-      AGE < 60 ~ "45-59",
-      AGE >= 60 ~ "60+",
-      TRUE ~ "Unknown"
-    ),
-    CITYCODE = CITYCODE
+    # Placeholder demographics (will be NA for non-PDI-synced records)
+    RESPONSECODE = NA_character_,
+    V1_FIRSTNAME = NA_character_,
+    V1_LASTNAME = NA_character_,
+    V1_PARTY = NA_character_,
+    PARTY_DISPLAY = "Unknown",
+    V1_GENDER = NA_character_,
+    GENDER_DISPLAY = "Unknown",
+    V1_ETHNICITY = NA_character_,
+    ETHNICITY_DISPLAY = "Unknown",
+    V1_AGE = NA_integer_,
+    AGE_GROUP = "Unknown",
+    CITYCODE = NA_character_,
+    CD = NA_character_,
+    SD = NA_character_,
+    AD = NA_character_
   ) %>%
   select(SOURCE, CHANNEL, PDIID, DATE, TIME, AGENT, CAMPAIGN_NAME,
          RESPONSECODE, RESPONSE_CATEGORY, CONTACT_MADE, IS_CONVERSATION,
@@ -244,10 +234,26 @@ callhub_final <- callhub_filtered %>%
          V1_GENDER, GENDER_DISPLAY, V1_ETHNICITY, ETHNICITY_DISPLAY,
          V1_AGE, AGE_GROUP, CITYCODE, CD, SD, AD)
 
-print(paste("CallHub final rows:", nrow(callhub_final)))
+# Remove CallHub attempts that already synced to PDI (avoid double counting)
+# Match on PDIID + DATE
+synced_keys <- callhub_responses %>%
+  filter(!is.na(PDIID)) %>%
+  mutate(key = paste(PDIID, DATE, sep = "_")) %>%
+  pull(key)
+
+callhub_attempts_unique <- callhub_attempts %>%
+  mutate(key = paste(PDIID, DATE, sep = "_")) %>%
+  filter(!(key %in% synced_keys)) %>%
+  select(-key)
+
+print(paste("CallHub attempts (not in PDI):", nrow(callhub_attempts_unique)))
+
+# Combine CallHub responses (from PDI) with unique CallHub attempts
+callhub_final <- bind_rows(callhub_responses, callhub_attempts_unique)
+print(paste("CallHub total (responses + unique attempts):", nrow(callhub_final)))
 
 # ============================================
-# SECTION 6: COMBINE FIELD + CALLHUB
+# SECTION 6: COMBINE ALL DATA
 # ============================================
 combined <- bind_rows(field_final, callhub_final)
 
@@ -265,7 +271,8 @@ print(table(combined$SOURCE))
 # ============================================
 # SECTION 7: VALIDATION CHECKS
 # ============================================
-print("=== FIELD CANVASSING (PDI) STATS ===")
+print("")
+print("=== FIELD CANVASSING STATS ===")
 field_stats <- field_final %>%
   summarise(
     Attempts = n(),
@@ -274,15 +281,18 @@ field_stats <- field_final %>%
     Yes = sum(RESPONSE_CATEGORY == "Yes"),
     Undecided = sum(RESPONSE_CATEGORY == "Undecided"),
     No = sum(RESPONSE_CATEGORY == "No"),
-    Refused = sum(RESPONSE_CATEGORY == "Refused"),
     No_Contact = sum(RESPONSE_CATEGORY == "No Contact")
   )
 print(field_stats)
-print(paste("Contact Rate:", round(field_stats$Contacts / field_stats$Attempts * 100, 1), "%"))
-print(paste("Conversation Rate:", round(field_stats$Conversations / field_stats$Contacts * 100, 1), "%"))
+if(field_stats$Attempts > 0) {
+  print(paste("Contact Rate:", round(field_stats$Contacts / field_stats$Attempts * 100, 1), "%"))
+}
+if(field_stats$Contacts > 0) {
+  print(paste("Conversation Rate:", round(field_stats$Conversations / field_stats$Contacts * 100, 1), "%"))
+}
 
 print("")
-print("=== CALLHUB (CH) STATS ===")
+print("=== CALLHUB STATS ===")
 callhub_stats <- callhub_final %>%
   summarise(
     Attempts = n(),
@@ -295,8 +305,12 @@ callhub_stats <- callhub_final %>%
     No_Contact = sum(RESPONSE_CATEGORY == "No Contact")
   )
 print(callhub_stats)
-print(paste("Contact Rate:", round(callhub_stats$Contacts / callhub_stats$Attempts * 100, 1), "%"))
-print(paste("Conversation Rate:", round(callhub_stats$Conversations / callhub_stats$Contacts * 100, 1), "%"))
+if(callhub_stats$Attempts > 0) {
+  print(paste("Contact Rate:", round(callhub_stats$Contacts / callhub_stats$Attempts * 100, 1), "%"))
+}
+if(callhub_stats$Contacts > 0) {
+  print(paste("Conversation Rate:", round(callhub_stats$Conversations / callhub_stats$Contacts * 100, 1), "%"))
+}
 
 print("")
 print("=== COMBINED STATS ===")
@@ -316,17 +330,17 @@ print(combined_stats)
 # ============================================
 # SECTION 8: UPLOAD TO BIGQUERY
 # ============================================
-# Upload Field Activity (for PDI chart)
+# Upload Field Activity
 bq_table_field <- bq_table(project = BQ_PROJECT, dataset = BQ_DATASET, table = "Field_Activity")
 bq_table_upload(bq_table_field, field_final, write_disposition = "WRITE_TRUNCATE")
 print(paste("✓ Field_Activity uploaded to", BQ_DATASET))
 
-# Upload CallHub Activity (for CH chart)
+# Upload CallHub Activity
 bq_table_callhub <- bq_table(project = BQ_PROJECT, dataset = BQ_DATASET, table = "CallHub_Activity")
 bq_table_upload(bq_table_callhub, callhub_final, write_disposition = "WRITE_TRUNCATE")
 print(paste("✓ CallHub_Activity uploaded to", BQ_DATASET))
 
-# Upload Combined Activity (for combined views, demographics, geography)
+# Upload Combined Activity
 bq_table_combined <- bq_table(project = BQ_PROJECT, dataset = BQ_DATASET, table = "Dashboard_Combined")
 bq_table_upload(bq_table_combined, combined, write_disposition = "WRITE_TRUNCATE")
 print(paste("✓ Dashboard_Combined uploaded to", BQ_DATASET))
