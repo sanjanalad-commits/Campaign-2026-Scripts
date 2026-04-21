@@ -118,7 +118,7 @@ pdi_final <- pdi_joined %>%
     SOURCE = ifelse(is.na(PHONEBANK) | PHONEBANK == "", "FIELD", "CALLHUB"),
     CHANNEL = ifelse(is.na(PHONEBANK) | PHONEBANK == "", "Door Knock", "Phone"),
     
-    PDIID = PDIID,
+    PDIID = as.character(PDIID),
     AGENT = CANVASSERNAME,
     CAMPAIGN_NAME = ifelse(is.na(PHONEBANK) | PHONEBANK == "", MOBILEPROJECTASSIGMENT, PHONEBANK),
     RESPONSECODE = RESPONSECODE,
@@ -163,7 +163,12 @@ pdi_final <- pdi_joined %>%
       V1_AGE < 60 ~ "45-59",
       V1_AGE >= 60 ~ "60+",
       TRUE ~ "Unknown"
-    )
+    ),
+    # Convert district columns to character
+    CD = as.character(CD),
+    SD = as.character(SD),
+    AD = as.character(AD),
+    CITYCODE = as.character(CITYCODE)
   ) %>%
   select(SOURCE, CHANNEL, PDIID, DATE, TIME, AGENT, CAMPAIGN_NAME,
          RESPONSECODE, RESPONSE_CATEGORY, CONTACT_MADE, IS_CONVERSATION,
@@ -203,7 +208,7 @@ callhub_attempts <- callhub_raw %>%
     CONTACT_MADE = "N",
     IS_CONVERSATION = 0,
     
-    # Placeholder demographics
+    # Placeholder demographics (all as character to match)
     RESPONSECODE = NA_character_,
     V1_FIRSTNAME = NA_character_,
     V1_LASTNAME = NA_character_,
